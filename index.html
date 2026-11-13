@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Brooklyn Street Cleaning Finder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{color-scheme:light;--bg:#eef1f4;--card:#fff;--ink:#14202b;--muted:#5d6b78;--line:#d5dce3;--green:#0b6e4f;--amber:#e08a00}
+@media(prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#0f161c;--card:#172029;--ink:#e7edf2;--muted:#93a1ad;--line:#2a3743;--green:#3ddc97;--amber:#ffc857}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 "Schibsted Grotesk",system-ui,sans-serif}
+main{max-width:1000px;margin:auto;padding:24px 16px 40px}h1{font-size:clamp(26px,5vw,38px);line-height:1.08;margin:0 0 8px;font-weight:800;letter-spacing:-.03em}
+.sub{color:var(--muted);margin:0 0 20px;max-width:70ch}.panel,.results{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field label{display:block;font-weight:700;margin-bottom:6px}
+input,select{width:100%;font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:11px 12px;min-height:44px}
+.days{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.days button,.refresh{font:inherit;border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:8px;padding:8px 13px;min-height:40px;cursor:pointer}
+.days button[aria-pressed=true]{background:var(--ink);color:var(--card);border-color:var(--ink)}
+.meta{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0 8px;color:var(--muted);font-size:13px}
+.result{padding:13px 0;border-top:1px solid var(--line)}.result:first-child{border-top:0}.street{font-weight:800;font-size:17px}.detail{color:var(--muted);margin-top:3px}.tag{display:inline-block;border-radius:5px;background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green);font-weight:700;font-size:12px;padding:3px 7px;margin-left:7px}
+.small{font-size:12px;color:var(--muted)}.empty{padding:26px 0;color:var(--muted)}.error{color:#b42318}.footer{font-size:12px;color:var(--muted);line-height:1.5;margin-top:16px}
+@media(max-width:620px){main{padding:16px 10px 28px}.controls{grid-template-columns:1fr}.panel,.results{padding:13px}}
+</style>
+</head>
+<body><main>
+<h1>Brooklyn street cleaning finder</h1>
+<p class="sub">Search a street or intersection, choose the days you need to park, and see the current NYC DOT street-cleaning restrictions for each block face.</p>
+<section class="panel">
+ <div class="controls">
+  <div class="field"><label for="q">Street or cross street</label><input id="q" type="search" placeholder="e.g. DeKalb, Carlton, Fulton"></div>
+  <div class="field"><label for="borough">Borough</label><select id="borough"><option>Brooklyn</option><option>Bronx</option><option>Manhattan</option><option>Queens</option><option>Staten Island</option></select></div>
+ </div>
+ <div style="font-weight:700;margin-top:14px">Show blocks with cleaning on</div>
+ <div class="days" id="days"></div>
+ <div class="small" style="margin-top:10px">Choose one or more days. Leave all days unselected to browse every street-cleaning block in the borough.</div>
+</section>
+<section class="results">
+ <div class="meta"><span id="status">Loading current NYC DOT sign data…</span><button class="refresh" id="refresh">Refresh data</button></div>
+ <div id="list"><div class="empty">Connecting to NYC Open Data…</div></div>
+</section>
+<p class="footer">Live source: NYC Department of Transportation, <a href="https://data.cityofnewyork.us/Transportation/Parking-Regulation-Locations-and-Signs/nfid-uabd" target="_blank" rel="noopener">Parking Regulation Locations and Signs</a>. The city dataset is updated daily. This tool interprets sign descriptions; always follow the actual posted signs, which control if there is a conflict. This page is an independent convenience tool and is not an official NYC DOT service.</p>
+</main>
+<script>
+const API="https://data.cityofnewyork.us/resource/nfid-uabd.json";
+const weekdays=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+let rows=[], selected=new Set(), loading=false;
+const $=id=>document.getElementById(id);
+const norm=s=>(s||"").toUpperCase().replace(/[^A-Z0-9]+/g," ").trim();
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function makeDays(){
+ $("days").replaceChildren();
+ weekdays.forEach(day=>{const b=document.createElement("button");b.textContent=day;b.type="button";b.setAttribute("aria-pressed",selected.has(day));b.onclick=()=>{selected.has(day)?selected.delete(day):selected.add(day);makeDays();render()};$("days").append(b)});
+}
+function isCleaning(s){return /SANITATION|STREET\s*CLEAN|STREET\s*SWEEP|BROOM|SWEEPING/i.test(s||"")}
+function parseDays(s){
+ const t=(s||"").toUpperCase().replace(/THURSDAY/g,"THU").replace(/TUESDAY/g,"TUE").replace(/WEDNESDAY/g,"WED").replace(/MONDAY/g,"MON").replace(/FRIDAY/g,"FRI").replace(/SATURDAY/g,"SAT").replace(/SUNDAY/g,"SUN");
+ const map=[["MON", "Mon"],["TUE","Tue"],["WED","Wed"],["THU","Thu"],["FRI","Fri"],["SAT","Sat"],["SUN","Sun"]];
+ let found=map.filter(([k])=>new RegExp("\\b"+k+"\\b").test(t)).map(x=>x[1]);
+ if(/DAILY|EVERY DAY|7 DAYS/.test(t))found=weekdays.slice();
+ if(/WEEKDAYS/.test(t))found=["Mon","Tue","Wed","Thu","Fri"];
+ return [...new Set(found)];
+}
+function parseTime(s){
+ const m=(s||"").match(/(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s*(?:TO|–|-)\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM))/i);
+ return m?m[1].replace(/\s+/g," ").toUpperCase()+"–"+m[2].replace(/\s+/g," ").toUpperCase():"Time shown on sign";
+}
+function groupRows(data){
+ const groups=new Map();
+ for(const r of data){
+  const desc=r.sign_description||"";
+  if(!isCleaning(desc))continue;
+  const street=r.on_street||"", from=r.from_street||"", to=r.to_street||"", side=r.side_of_street||"";
+  if(!street||!from||!to)continue;
+  const key=[norm(street),norm(from),norm(to),norm(side)].join("|");
+  if(!groups.has(key))groups.set(key,{street,from,to,side,days:new Set(),times:new Set(),signs:new Set(),descriptions:new Set()});
+  const g=groups.get(key);parseDays(desc).forEach(d=>g.days.add(d));g.times.add(parseTime(desc));if(r.sign_code)g.signs.add(r.sign_code);g.descriptions.add(desc);
+ }
+ return [...groups.values()].map(g=>({...g,days:weekdays.filter(d=>g.days.has(d)),times:[...g.times],signs:[...g.signs]}))
+  .filter(g=>g.days.length).sort((a,b)=>a.street.localeCompare(b.street)||a.from.localeCompare(b.from));
+}
+async function load(){
+ if(loading)return;loading=true;$("status").textContent="Loading current NYC DOT data…";$("list").innerHTML='<div class="empty">Fetching current sign records from NYC Open Data…</div>';
+ try{
+  const borough=$("borough").value;
+  let all=[],offset=0,limit=50000;
+  while(true){
+   const params=new URLSearchParams({$select:"borough,record_type,on_street,from_street,to_street,side_of_street,sign_code,sign_description",$where:`borough='${borough}' AND record_type='Current' AND sign_description IS NOT NULL`,$limit:String(limit),$offset:String(offset)});
+   const res=await fetch(API+"?"+params.toString(),{headers:{"Accept":"application/json"}});
+   if(!res.ok)throw new Error("NYC Open Data returned HTTP "+res.status);
+   const batch=await res.json();all=all.concat(batch);if(batch.length<limit)break;offset+=limit;
+   $("status").textContent=`Downloaded ${all.length.toLocaleString()} current ${borough} sign records…`;
+   if(offset>=250000)break;
+  }
+  rows=groupRows(all);$("status").textContent=`${rows.length.toLocaleString()} street-cleaning block faces parsed from ${all.length.toLocaleString()} current ${borough} sign records.`;
+  render();
+ }catch(e){$("status").innerHTML='<span class="error">Could not load live data: '+esc(e.message)+'. Check your connection and try Refresh.</span>';$("list").innerHTML='<div class="empty">Live NYC DOT data is unavailable right now. No cached or stale schedule is being shown.</div>'}
+ finally{loading=false}
+}
+function render(){
+ const q=norm($("q").value),days=[...selected];
+ const found=rows.filter(r=>{
+  const hay=norm([r.street,r.from,r.to].join(" "));
+  return (!q||hay.includes(q))&&(!days.length||days.some(d=>r.days.includes(d)));
+ });
+ $("list").replaceChildren();
+ if(!rows.length)return;
+ if(!found.length){$("list").innerHTML='<div class="empty">No matching street-cleaning signs found. Try a shorter street name or different day.</div>';return}
+ found.forEach(r=>{
+  const d=document.createElement("article");d.className="result";
+  const label=document.createElement("div");label.className="street";label.textContent=r.street;
+  const tag=document.createElement("span");tag.className="tag";tag.textContent=r.days.join(", ");label.append(tag);
+  const detail=document.createElement("div");detail.className="detail";detail.textContent=`${r.from} to ${r.to} · ${r.side} side · ${r.times.join("; ")}`;
+  const extra=document.createElement("div");extra.className="small";extra.textContent=r.signs.length?`DOT sign code(s): ${r.signs.join(", ")}`:"Current DOT sign record";
+  d.append(label,detail,extra);$("list").append(d);
+ });
+}
+$("q").addEventListener("input",render);$("borough").addEventListener("change",load);$("refresh").addEventListener("click",load);
+makeDays();load();
+</script></body></html>
